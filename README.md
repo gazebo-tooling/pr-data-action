@@ -19,7 +19,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Validate PR Data
-        uses: your-username/pr-data-action@v1
+        uses:gazebo-tooling/pr-data-action
         with:
           token: ${{ secrets.GITHUB_TOKEN }}
           changelog-dir: '.changelog'  # Optional, defaults to '.changelog'
