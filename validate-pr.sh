@@ -9,7 +9,7 @@ NC='\033[0m' # No Color
 
 # Configuration
 CHANGELOG_DIR="${CHANGELOG_DIR:-.changelog}"
-REQUIRED_VERSION_BUMPS=("patch" "minor" "major")
+REQUIRED_VERSION_BUMPS=("patch" "minor" "major", "none")
 
 # Helper functions
 log_info() {
@@ -116,7 +116,7 @@ check_version_bump_trailer() {
         # Look for Version-Bump: trailer (case insensitive)
         if echo "${message}" | grep -qi "Version-Bump:"; then
             # Extract the value after Version-Bump:
-            bump_value=$(echo "${message}" | grep -oiE "Version-Bump:\s*(patch|minor|major)" | cut -d':' -f2 | xargs | tr '[:upper:]' '[:lower:]')
+            bump_value=$(echo "${message}" | grep -oiE "Version-Bump:\s*(patch|minor|major|none)" | cut -d':' -f2 | xargs | tr '[:upper:]' '[:lower:]')
 
             if [[ -n "${bump_value}" ]]; then
                 # Validate the bump value
@@ -140,6 +140,7 @@ check_version_bump_trailer() {
         echo "      - Version-Bump: patch   (for bug fixes)"
         echo "      - Version-Bump: minor   (for new features)"
         echo "      - Version-Bump: major   (for breaking changes)"
+        echo "      - Version-Bump: none    (for changes not affecting the releasing code)"
         echo "   2. The trailer should be on its own line at the end of the commit message"
         echo ""
         echo "Example commit message:"
@@ -244,7 +245,7 @@ The following issues were found with this PR:
         if [[ "$version_bump_passed" != "true" ]]; then
             comment_body+="- ❌ **Missing version bump trailer**
   - Please add a \`Version-Bump:\` trailer to one of your commit messages using \`git commit --trailer 'Version-Bump: <type>'\`
-  - Valid types: \`patch\` (bug fixes), \`minor\` (new features), \`major\` (breaking changes)
+  - Valid types: \`patch\` (bug fixes), \`minor\` (new features), \`major\` (breaking changes) \`none\` (changes not affecting releases)
   - Example:
     \`\`\`
     Fix critical bug in user authentication
