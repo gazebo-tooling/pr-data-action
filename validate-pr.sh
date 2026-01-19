@@ -9,7 +9,6 @@ NC='\033[0m' # No Color
 
 # Configuration
 CHANGELOG_DIR="${CHANGELOG_DIR:-.changelog}"
-REQUIRED_VERSION_BUMPS=("patch" "minor" "major", "none")
 
 # Helper functions
 log_info() {
@@ -91,79 +90,6 @@ check_changelog_file() {
     return 0
 }
 
-# Get commit messages for the PR
-get_pr_commits() {
-    local pr_number=$1
-    log_info "Fetching commits for PR #${pr_number}..."
-
-    # Use GitHub API to get PR commits
-    curl -s \
-        -H "Authorization: token ${GITHUB_TOKEN}" \
-        -H "Accept: application/vnd.github.v3+json" \
-        "https://api.github.com/repos/${GITHUB_REPOSITORY}/pulls/${pr_number}/commits" \
-        | jq -r '.[].commit.message'
-}
-
-# Check for version bump trailer in commit messages
-check_version_bump_trailer() {
-    local commit_messages="$1"
-    local version_bump_found=false
-    local version_bump_type=""
-
-    log_info "Checking for Version-Bump trailer in commit messages..."
-
-    while IFS= read -r message; do
-        # Look for Version-Bump: trailer (case insensitive)
-        if echo "${message}" | grep -qi "Version-Bump:"; then
-            # Extract the value after Version-Bump:
-            bump_value=$(echo "${message}" | grep -oiE "Version-Bump:\s*(patch|minor|major|none)" | cut -d':' -f2 | xargs | tr '[:upper:]' '[:lower:]')
-
-            if [[ -n "${bump_value}" ]]; then
-                # Validate the bump value
-                for valid_bump in "${REQUIRED_VERSION_BUMPS[@]}"; do
-                    if [[ "${bump_value}" == "${valid_bump}" ]]; then
-                        log_info "Found valid Version-Bump trailer: ${bump_value}"
-                        version_bump_found=true
-                        version_bump_type="${bump_value}"
-                        break 2
-                    fi
-                done
-            fi
-        fi
-    done <<< "${commit_messages}"
-
-    if [[ "${version_bump_found}" == "false" ]]; then
-        log_error "No valid Version-Bump trailer found in commit messages"
-        echo ""
-        echo "🏷️  Please add a Version-Bump trailer to one of your commits:"
-        echo "   1. Edit your commit message to include one of:"
-        echo "      - Version-Bump: patch   (for bug fixes)"
-        echo "      - Version-Bump: minor   (for new features)"
-        echo "      - Version-Bump: major   (for breaking changes)"
-        echo "      - Version-Bump: none    (for changes not affecting the releasing code)"
-        echo "   2. The trailer should be on its own line at the end of the commit message"
-        echo ""
-        echo "Example commit message:"
-        echo "Fix critical bug in user authentication"
-        echo ""
-        echo "This fixes an issue where users couldn't log in"
-        echo "after password reset."
-        echo ""
-        echo "Version-Bump: patch"
-        echo ""
-        return 1
-    fi
-
-    # Set outputs (only when version bump is found)
-    echo "changelog-found=true" >> $GITHUB_OUTPUT
-    echo "version-bump-found=true" >> $GITHUB_OUTPUT
-    echo "version-bump-type=${version_bump_type}" >> $GITHUB_OUTPUT
-
-    # Export version_bump_type for use in main function
-    export VERSION_BUMP_TYPE="${version_bump_type}"
-
-    return 0
-}
 
 # Add review comment to PR
 add_review_comment() {
@@ -205,65 +131,31 @@ add_review_comment() {
 # Generate review comment based on validation results
 generate_review_comment() {
     local changelog_passed="$1"
-    local version_bump_passed="$2"
-    local version_bump_type="$3"
 
     local comment_body=""
     local review_event=""
 
-    if [[ "$changelog_passed" == "true" && "$version_bump_passed" == "true" ]]; then
+    if [[ "$changelog_passed" == "true" ]]; then
         # All checks passed
         comment_body="## ✅ Changelog Validation Passed
 
 All required data for the changelog validation checks have passed:
 
 - ✅ **Changelog file found** - Changes are documented
-- ✅ **Version bump trailer found** - Type: \`${version_bump_type}\`
 
 This PR is ready for review! 🚀"
         review_event="COMMENT"
     else
-        # Some checks failed
+        # Checks failed
         comment_body="## ❌ Changelog Validation Failed
 
 The following issues were found with this PR:
 
-"
-        if [[ "$changelog_passed" != "true" ]]; then
-            comment_body+="- ❌ **Missing changelog file**
+- ❌ **Missing changelog file**
   - Please add a changelog file to the \`.changelog/\` directory
   - Name it descriptively (e.g., \`fix-bug-123.md\`, \`add-new-feature.md\`)
   - Document what changed, why, and any breaking changes
 
-"
-        else
-            comment_body+="- ✅ **Changelog file found**
-
-"
-        fi
-
-        if [[ "$version_bump_passed" != "true" ]]; then
-            comment_body+="- ❌ **Missing version bump trailer**
-  - Please add a \`Version-Bump:\` trailer to one of your commit messages using \`git commit --trailer 'Version-Bump: <type>'\`
-  - Valid types: \`patch\` (bug fixes), \`minor\` (new features), \`major\` (breaking changes) \`none\` (changes not affecting releases)
-  - Example:
-    \`\`\`
-    Fix critical bug in user authentication
-
-    This fixes an issue where users couldn't log in
-    after password reset.
-
-    Version-Bump: patch
-    \`\`\`
-
-"
-        else
-            comment_body+="- ✅ **Version bump trailer found** - Type: \`${version_bump_type}\`
-
-"
-        fi
-
-        comment_body+="
 Please fix the issues above and push your changes. The validation will run again automatically."
         review_event="REQUEST_CHANGES"
     fi
@@ -297,29 +189,19 @@ main() {
         changelog_check_passed=false
     fi
 
-    # Get commit messages
-    COMMIT_MESSAGES=$(get_pr_commits "${PR_NUMBER}")
-    if [[ -z "${COMMIT_MESSAGES}" ]]; then
-        log_error "No commit messages found for this PR"
-        exit 1
-    fi
-
-    # Check for version bump trailer
-    version_bump_check_passed=true
-    if ! check_version_bump_trailer "${COMMIT_MESSAGES}"; then
-        version_bump_check_passed=false
-    fi
-
     # Generate review comment
-    REVIEW_COMMENT=$(generate_review_comment "${changelog_check_passed}" "${version_bump_check_passed}" "${VERSION_BUMP_TYPE}")
+    REVIEW_COMMENT=$(generate_review_comment "${changelog_check_passed}")
     COMMENT_BODY="${REVIEW_COMMENT%|*}"
     REVIEW_EVENT="${REVIEW_COMMENT#*|}"
 
     # Add review comment to PR
     add_review_comment "${PR_NUMBER}" "${COMMENT_BODY}" "${REVIEW_EVENT}"
 
+    # Set output
+    echo "changelog-found=${changelog_check_passed}" >> $GITHUB_OUTPUT
+
     # Final validation result
-    if [[ "${changelog_check_passed}" == "true" && "${version_bump_check_passed}" == "true" ]]; then
+    if [[ "${changelog_check_passed}" == "true" ]]; then
         log_info "✅ All PR data validation checks passed!"
         exit 0
     else

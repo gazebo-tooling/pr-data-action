@@ -1,8 +1,6 @@
 # PR Data Validation Action
 
-A GitHub Action that validates pull requests contain both:
-1. A new file in the `.changelog` directory
-2. A commit with a `Version-Bump:` trailer specifying `patch`, `minor`, or `major`
+A GitHub Action that validates pull requests contain a changelog file in the `.changelog` directory.
 
 ## Usage
 
@@ -37,12 +35,10 @@ jobs:
 | Output | Description |
 |--------|-------------|
 | `changelog-found` | Whether a changelog file was found |
-| `version-bump-found` | Whether a valid version bump trailer was found |
-| `version-bump-type` | The type of version bump (patch, minor, major) |
 
 ## What it checks
 
-### 1. Changelog File
+### Changelog File
 The action checks if the PR includes any new or modified files in the specified changelog directory (`.changelog` by default).
 
 **Example changelog file structure:**
@@ -51,24 +47,6 @@ The action checks if the PR includes any new or modified files in the specified 
 ├── fix-login-bug.md
 ├── add-user-profile.md
 └── breaking-change-api.md
-```
-
-### 2. Version Bump Trailer
-The action looks for a `Version-Bump:` trailer in any of the commit messages in the PR.
-
-**Valid version bump values:**
-- `patch` - for bug fixes and small changes
-- `minor` - for new features (backward compatible)
-- `major` - for breaking changes
-
-**Example commit message:**
-```
-Fix critical authentication bug
-
-This resolves an issue where users couldn't log in
-after password reset.
-
-Version-Bump: patch
 ```
 
 ## Error Messages
@@ -81,16 +59,6 @@ The action provides helpful error messages when validation fails:
    1. Create a new file in the .changelog/ directory
    2. Name it descriptively (e.g., fix-bug-123.md, add-new-feature.md)
    3. Document what changed, why, and any breaking changes
-```
-
-### Missing Version Bump
-```
-🏷️  Please add a Version-Bump trailer to one of your commits:
-   1. Edit your commit message to include one of:
-      - Version-Bump: patch   (for bug fixes)
-      - Version-Bump: minor   (for new features)
-      - Version-Bump: major   (for breaking changes)
-   2. The trailer should be on its own line at the end of the commit message
 ```
 
 ## Development
