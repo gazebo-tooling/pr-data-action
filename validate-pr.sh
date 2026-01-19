@@ -84,6 +84,11 @@ check_changelog_file() {
         echo "   1. Create a new file in the ${CHANGELOG_DIR}/ directory"
         echo "   2. Name it descriptively (e.g., fix-bug-123.md, add-new-feature.md)"
         echo "   3. The content must follow conventional commits format"
+        echo "      See: https://www.conventionalcommits.org/en/v1.0.0/#summary"
+        echo ""
+        echo "   Example:"
+        echo "      feat: add support for flying robots"
+        echo "      fix: resolve memory leak in the walking algorithm"
         echo ""
         return 1
     fi
