@@ -184,17 +184,18 @@ add_review_comment() {
 }
 
 # Generate review comment based on validation results
+# Sets global variables: REVIEW_COMMENT_BODY and REVIEW_EVENT
 generate_review_comment() {
     local changelog_found="$1"
     local content_valid="$2"
     local content_error="$3"
 
-    local comment_body=""
-    local review_event=""
+    REVIEW_COMMENT_BODY=""
+    REVIEW_EVENT=""
 
     if [[ "$changelog_found" == "true" && "$content_valid" == "true" ]]; then
         # All checks passed
-        comment_body="## ✅ Changelog Validation Passed
+        REVIEW_COMMENT_BODY="## ✅ Changelog Validation Passed
 
 All required data for the changelog validation checks have passed:
 
@@ -202,29 +203,29 @@ All required data for the changelog validation checks have passed:
 - ✅ **Content format valid** - Follows conventional commits specification
 
 This PR is ready for review! 🚀"
-        review_event="COMMENT"
+        REVIEW_EVENT="COMMENT"
     else
         # Some checks failed
-        comment_body="## ❌ Changelog Validation Failed
+        REVIEW_COMMENT_BODY="## ❌ Changelog Validation Failed
 
 The following issues were found with this PR:
 
 "
         if [[ "$changelog_found" != "true" ]]; then
-            comment_body+="- ❌ **Missing changelog file**
+            REVIEW_COMMENT_BODY+="- ❌ **Missing changelog file**
   - Please add a changelog file to the \`.changelog/\` directory
   - Name it descriptively (e.g., \`fix-bug-123.md\`, \`add-new-feature.md\`)
   - The content must follow conventional commits format
 
 "
         else
-            comment_body+="- ✅ **Changelog file found**
+            REVIEW_COMMENT_BODY+="- ✅ **Changelog file found**
 
 "
         fi
 
         if [[ "$changelog_found" == "true" && "$content_valid" != "true" ]]; then
-            comment_body+="- ❌ **Invalid changelog content format**
+            REVIEW_COMMENT_BODY+="- ❌ **Invalid changelog content format**
   - The changelog content must follow the [Conventional Commits](https://www.conventionalcommits.org/) specification
   - Error: \`${content_error}\`
 
@@ -239,16 +240,14 @@ The following issues were found with this PR:
 
 "
         elif [[ "$changelog_found" == "true" ]]; then
-            comment_body+="- ✅ **Content format valid**
+            REVIEW_COMMENT_BODY+="- ✅ **Content format valid**
 
 "
         fi
 
-        comment_body+="Please fix the issues above and push your changes. The validation will run again automatically."
-        review_event="REQUEST_CHANGES"
+        REVIEW_COMMENT_BODY+="Please fix the issues above and push your changes. The validation will run again automatically."
+        REVIEW_EVENT="REQUEST_CHANGES"
     fi
-
-    echo "$comment_body|$review_event"
 }
 
 # Main validation function
@@ -284,13 +283,11 @@ main() {
         fi
     fi
 
-    # Generate review comment
-    REVIEW_COMMENT=$(generate_review_comment "${changelog_found}" "${content_valid}" "${CONTENT_VALIDATION_ERROR}")
-    COMMENT_BODY="${REVIEW_COMMENT%|*}"
-    REVIEW_EVENT="${REVIEW_COMMENT#*|}"
+    # Generate review comment (sets REVIEW_COMMENT_BODY and REVIEW_EVENT globals)
+    generate_review_comment "${changelog_found}" "${content_valid}" "${CONTENT_VALIDATION_ERROR}"
 
     # Add review comment to PR
-    add_review_comment "${PR_NUMBER}" "${COMMENT_BODY}" "${REVIEW_EVENT}"
+    add_review_comment "${PR_NUMBER}" "${REVIEW_COMMENT_BODY}" "${REVIEW_EVENT}"
 
     # Set outputs
     echo "changelog-found=${changelog_found}" >> $GITHUB_OUTPUT
