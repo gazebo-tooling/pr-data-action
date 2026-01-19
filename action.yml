@@ -19,6 +19,8 @@ inputs:
 outputs:
   changelog-found:
     description: 'Whether a changelog file was found'
+  changelog-valid:
+    description: 'Whether the changelog content follows conventional commits format'
 
 runs:
   using: 'composite'
@@ -28,6 +30,13 @@ runs:
       run: |
         echo "Installing jq..."
         sudo apt-get update && sudo apt-get install -y jq
+
+    - name: Install cocogitto
+      shell: bash
+      run: |
+        echo "Installing cocogitto..."
+        curl -sSL https://github.com/cocogitto/cocogitto/releases/download/6.5.0/cocogitto-6.5.0-x86_64-unknown-linux-musl.tar.gz | tar xz -C /tmp
+        sudo mv /tmp/cog /usr/local/bin/
 
     - name: Validate PR Data
       shell: bash

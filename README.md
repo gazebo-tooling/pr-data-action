@@ -1,6 +1,6 @@
 # PR Data Validation Action
 
-A GitHub Action that validates pull requests contain a changelog file in the `.changelog` directory.
+A GitHub Action that validates pull requests contain a changelog file in the `.changelog` directory with content following the [Conventional Commits](https://www.conventionalcommits.org/) specification.
 
 ## Usage
 
@@ -35,10 +35,11 @@ jobs:
 | Output | Description |
 |--------|-------------|
 | `changelog-found` | Whether a changelog file was found |
+| `changelog-valid` | Whether the changelog content follows conventional commits format |
 
 ## What it checks
 
-### Changelog File
+### 1. Changelog File Presence
 The action checks if the PR includes any new or modified files in the specified changelog directory (`.changelog` by default).
 
 **Example changelog file structure:**
@@ -49,6 +50,32 @@ The action checks if the PR includes any new or modified files in the specified 
 └── breaking-change-api.md
 ```
 
+### 2. Conventional Commits Format
+The content of the changelog file must follow the [Conventional Commits](https://www.conventionalcommits.org/) specification. This is validated using [cocogitto](https://github.com/cocogitto/cocogitto).
+
+**Valid changelog content examples:**
+```
+feat: add user authentication
+```
+```
+fix: resolve login timeout issue
+```
+```
+feat(api): add new endpoint for user profiles
+```
+```
+fix(ui): correct button alignment on mobile
+```
+```
+feat!: redesign authentication flow
+```
+
+**Format specification:**
+- `type`: The type of change (e.g., `feat`, `fix`, `docs`, `style`, `refactor`, `test`, `chore`)
+- `scope` (optional): The scope of the change in parentheses (e.g., `(api)`, `(ui)`)
+- `!` (optional): Indicates a breaking change
+- `description`: A short description of the change
+
 ## Error Messages
 
 The action provides helpful error messages when validation fails:
@@ -58,7 +85,15 @@ The action provides helpful error messages when validation fails:
 📝 Please add a changelog file to document your changes:
    1. Create a new file in the .changelog/ directory
    2. Name it descriptively (e.g., fix-bug-123.md, add-new-feature.md)
-   3. Document what changed, why, and any breaking changes
+   3. The content must follow conventional commits format
+```
+
+### Invalid Changelog Format
+When a changelog file is found but its content doesn't follow conventional commits format:
+```
+- ❌ Invalid changelog content format
+  - The changelog content must follow the Conventional Commits specification
+  - Error: <specific error from validator>
 ```
 
 ## Development
