@@ -1,29 +1,29 @@
-name: 'PR Data Validation'
-description: 'Validates that PRs contain changelog files with conventional commits format'
-author: 'Your Name'
+name: "PR Data Validation"
+description: "Validates that PRs contain changelog files with conventional commits format"
+author: "Your Name"
 
 branding:
-  icon: 'check-circle'
-  color: 'green'
+  icon: "check-circle"
+  color: "green"
 
 inputs:
   token:
-    description: 'GitHub token for API access'
+    description: "GitHub token for API access"
     required: true
     default: ${{ github.token }}
   changelog-dir:
-    description: 'Directory where changelog files should be located'
+    description: "Directory where changelog files should be located"
     required: false
-    default: '.changelog'
+    default: ".changelog"
 
 outputs:
   changelog-found:
-    description: 'Whether a changelog file was found'
+    description: "Whether a changelog file was found"
   changelog-valid:
-    description: 'Whether the changelog content follows conventional commits format'
+    description: "Whether the changelog content follows conventional commits format"
 
 runs:
-  using: 'composite'
+  using: "composite"
   steps:
     - name: Install jq
       shell: bash
@@ -36,7 +36,7 @@ runs:
       run: |
         echo "Installing cocogitto..."
         curl -sSL https://github.com/cocogitto/cocogitto/releases/download/6.5.0/cocogitto-6.5.0-x86_64-unknown-linux-musl.tar.gz | tar xz -C /tmp
-        sudo mv /tmp/cog /usr/local/bin/
+        sudo mv /tmp/*/cog /usr/local/bin/
 
     - name: Validate PR Data
       shell: bash
