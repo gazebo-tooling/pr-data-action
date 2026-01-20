@@ -224,18 +224,18 @@ The following issues were found with this PR:
     fi
 
     if [[ "$changelog_found" == "true" && "$content_valid" != "true" ]]; then
-      REVIEW_COMMENT_BODY+="- ❌ **Invalid changelog content format**
-  - The changelog content must follow the [Conventional Commits](https://www.conventionalcommits.org/) specification
-  
-  **Error:**
-  \`\`\`
-  ${content_error}
-  \`\`\`
-  **Valid format examples:**
-  \`\`\`
-  feat: add flying robot support
-  fix: fix a memory link in the walking algorithm 
-  \`\`\`
+      REVIEW_COMMENT_BODY+="- ❌ **Invalid changelog content format** - The changelog content must follow the [Conventional Commits](https://www.conventionalcommits.org/) specification
+
+**Error:**
+\`\`\`
+${content_error}
+\`\`\`
+
+**Valid format examples:**
+\`\`\`
+feat: add flying robot support
+fix: fix a memory link in the walking algorithm
+\`\`\`
 
 "
     elif [[ "$changelog_found" == "true" ]]; then
