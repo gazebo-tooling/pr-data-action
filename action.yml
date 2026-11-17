@@ -8,19 +8,25 @@ branding:
 
 inputs:
   token:
-    description: "GitHub token for API access"
+    description: "GitHub token used to read the pull request files (read access is enough)"
     required: true
     default: ${{ github.token }}
   changelog-dir:
     description: "Directory where changelog files should be located"
     required: false
     default: ".changelog"
+  skip-label:
+    description: "Pull requests with this label pass without a changelog entry (e.g. forward ports, releases). Empty disables it."
+    required: false
+    default: "no-changelog"
 
 outputs:
   changelog-found:
-    description: "Whether a changelog file was found"
+    description: "Whether the pull request adds or modifies at least one changelog entry"
+    value: ${{ steps.validate.outputs.changelog-found }}
   changelog-valid:
-    description: "Whether the changelog content follows conventional commits format"
+    description: "Whether every changelog entry of the pull request is valid"
+    value: ${{ steps.validate.outputs.changelog-valid }}
 
 runs:
   using: "composite"
@@ -39,12 +45,14 @@ runs:
         sudo mv /tmp/*/cog /usr/local/bin/
 
     - name: Validate PR Data
+      id: validate
       shell: bash
       run: |
         echo "Starting PR data validation..."
-        ${{ github.action_path }}/validate-pr.sh
+        "${GITHUB_ACTION_PATH}/validate-pr.sh"
       env:
         GITHUB_TOKEN: ${{ inputs.token }}
         CHANGELOG_DIR: ${{ inputs.changelog-dir }}
+        SKIP_LABEL: ${{ inputs.skip-label }}
         GITHUB_REPOSITORY: ${{ github.repository }}
         GITHUB_EVENT_PATH: ${{ github.event_path }}
