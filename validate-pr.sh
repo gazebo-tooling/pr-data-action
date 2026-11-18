@@ -1,5 +1,21 @@
 #!/bin/bash
-set -e
+# Validate the changelog entries of a pull request.
+#
+# Every file added, modified or renamed under CHANGELOG_DIR is an entry, except
+# hidden files and files inside hidden directories (e.g. the .gitkeep that
+# keeps the directory). Removed files are ignored: the release commit removes
+# the entries it processed.
+#
+# The entry rules mirror create_changelog_entry.py (gazebo-tooling/release-tools),
+# which turns the entries into Changelog.md at release time, so an entry that
+# passes here can be released.
+#
+# Results go to the job log, the job summary and error annotations. The script
+# only reads from the GitHub API, so the read-only token of fork PRs is enough.
+set -euo pipefail
+
+# Byte-wise matching: [a-z] must not match uppercase letters in some locales
+export LC_ALL=C
 
 # Colors for output
 RED='\033[0;31m'
@@ -9,325 +25,308 @@ NC='\033[0m' # No Color
 
 # Configuration
 CHANGELOG_DIR="${CHANGELOG_DIR:-.changelog}"
-REQUIRED_VERSION_BUMPS=("patch" "minor" "major", "none")
+CHANGELOG_DIR="${CHANGELOG_DIR%/}"
+SKIP_LABEL="${SKIP_LABEL:-}"
+GITHUB_API_URL="${GITHUB_API_URL:-https://api.github.com}"
+GITHUB_OUTPUT="${GITHUB_OUTPUT:-/dev/null}"
+GITHUB_STEP_SUMMARY="${GITHUB_STEP_SUMMARY:-/dev/null}"
 
-# Helper functions
+# CONVENTIONAL_COMMIT_HEADER_RE of create_changelog_entry.py. Group 2 is the
+# breaking marker '!'.
+HEADER_RE='^[a-z]+(\([^()]+\))?(!)?: [^[:space:]]'
+# Conventional Commits breaking change footer
+BREAKING_FOOTER_RE='^BREAKING[ -]CHANGE(: | #)'
+
+# Helper functions. The message is printed as is (%s): it can contain file
+# names from the PR, and expanding their escapes (echo -e) could print a new
+# line that GitHub runs as a workflow command.
 log_info() {
-    echo -e "${GREEN}[INFO]${NC} $1"
+  printf '%b[INFO]%b %s\n' "${GREEN}" "${NC}" "$1"
 }
 
 log_warn() {
-    echo -e "${YELLOW}[WARN]${NC} $1"
+  printf '%b[WARN]%b %s\n' "${YELLOW}" "${NC}" "$1"
 }
 
 log_error() {
-    echo -e "${RED}[ERROR]${NC} $1"
+  printf '%b[ERROR]%b %s\n' "${RED}" "${NC}" "$1"
+}
+
+# Print text that comes from the pull request (entry content, cog output)
+# without letting GitHub run workflow commands (lines like '::error::') in it.
+print_untrusted() {
+  local token="untrusted-${RANDOM}${RANDOM}${RANDOM}"
+  echo "::stop-commands::${token}"
+  printf '%s\n' "$1"
+  echo "::${token}::"
+}
+
+escape_data() {
+  local s="$1"
+  s="${s//'%'/'%25'}"
+  s="${s//$'\r'/'%0D'}"
+  s="${s//$'\n'/'%0A'}"
+  printf '%s' "${s}"
+}
+
+escape_property() {
+  local s
+  s=$(escape_data "$1")
+  s="${s//':'/'%3A'}"
+  s="${s//','/'%2C'}"
+  printf '%s' "${s}"
+}
+
+# Error annotation, shown in the checks UI and, with a file, in the diff
+annotate_error() {
+  local file="$1"
+  local title="$2"
+  local message="$3"
+  local properties
+  properties="title=$(escape_property "${title}")"
+
+  if [[ -n "${file}" ]]; then
+    properties="file=$(escape_property "${file}"),line=1,${properties}"
+  fi
+  echo "::error ${properties}::$(escape_data "${message}")"
+}
+
+# Markdown code block that the content can't break out of
+indent_block() {
+  sed 's/^/    /' <<<"$1"
+}
+
+summary() {
+  printf '%s\n' "$@" >>"${GITHUB_STEP_SUMMARY}"
+}
+
+set_outputs() {
+  echo "changelog-found=$1" >>"${GITHUB_OUTPUT}"
+  echo "changelog-valid=$2" >>"${GITHUB_OUTPUT}"
 }
 
 # Check if we're in a pull request context
 check_pr_context() {
-    if [[ "${GITHUB_EVENT_NAME}" != "pull_request" ]]; then
-        log_error "This action should only run on pull request events"
-        exit 1
+  if [[ "${GITHUB_EVENT_NAME:-}" != "pull_request" ]]; then
+    log_error "This action should only run on pull request events"
+    exit 1
+  fi
+  if [[ ! -f "${GITHUB_EVENT_PATH:-}" ]]; then
+    log_error "GITHUB_EVENT_PATH is not set or file does not exist"
+    exit 1
+  fi
+}
+
+# GET a GitHub API URL and print the response body. Fails on HTTP errors.
+api_get() {
+  local url="$1"
+  local accept="${2:-application/vnd.github+json}"
+  local -a headers=(-H "Accept: ${accept}" -H "X-GitHub-Api-Version: 2022-11-28")
+
+  if [[ -n "${GITHUB_TOKEN:-}" ]]; then
+    headers+=(-H "Authorization: Bearer ${GITHUB_TOKEN}")
+  fi
+  curl -fsSL --retry 3 "${headers[@]}" "${url}"
+}
+
+# Print the files of the PR as JSON lines {filename, status, contents_url}.
+# The API returns 100 files per page at most, so read every page.
+get_pr_files() {
+  local pr_number="$1"
+  local page=1
+  local response
+
+  while true; do
+    response=$(api_get "${GITHUB_API_URL}/repos/${GITHUB_REPOSITORY}/pulls/${pr_number}/files?per_page=100&page=${page}") || return 1
+    jq -c '.[] | {filename, status, contents_url}' <<<"${response}" || return 1
+    if [[ $(jq 'length' <<<"${response}") -lt 100 ]]; then
+      return 0
     fi
+    page=$((page + 1))
+  done
 }
 
-# Get PR number from GitHub context
-get_pr_number() {
-    if [[ -f "${GITHUB_EVENT_PATH}" ]]; then
-        # Extract PR number directly from the event JSON using jq
-        PR_NUMBER=$(jq -r '.pull_request.number' "${GITHUB_EVENT_PATH}")
-
-        if [[ -z "${PR_NUMBER}" || "${PR_NUMBER}" == "null" ]]; then
-            log_error "Could not extract PR number from event data"
-            exit 1
-        fi
-
-        echo "${PR_NUMBER}"
-    else
-        log_error "GITHUB_EVENT_PATH is not set or file does not exist"
-        exit 1
-    fi
+# Read PR file JSON lines on stdin and print "<path>\t<contents_url>" for each
+# changelog entry (see the top of the file for what counts as an entry).
+select_entries() {
+  jq -r --arg dir "${CHANGELOG_DIR}/" '
+    select(.status != "removed")
+    | select(.filename | startswith($dir))
+    | select(.filename | ltrimstr($dir) | split("/") | any(startswith(".")) | not)
+    | [.filename, .contents_url] | @tsv'
 }
 
-# Get list of files changed in the PR
-get_changed_files() {
-    local pr_number=$1
-
-    # Use GitHub API to get PR files
-    curl -s \
-        -H "Authorization: token ${GITHUB_TOKEN}" \
-        -H "Accept: application/vnd.github.v3+json" \
-        "https://api.github.com/repos/${GITHUB_REPOSITORY}/pulls/${pr_number}/files" \
-        | jq -r '.[].filename'
+# Print the entry the way create_changelog_entry.py reads it: universal
+# newlines, template comment lines ('# ...') removed, no leading or trailing
+# blank lines.
+normalize_entry() {
+  sed 's/\r$//' | tr '\r' '\n' | sed -E '/^[[:space:]]*#([[:space:]]|$)/d' | awk '
+    NF {
+      if (!started) sub(/^[[:space:]]+/, "")
+      started = 1
+      for (; blanks > 0; blanks--) print ""
+      print
+      next
+    }
+    started { blanks++ }'
 }
 
-# Check if changelog file exists in changed files
-check_changelog_file() {
-    local changed_files="$1"
-    local changelog_found=false
+# Check a normalized entry. On failure print the reason and return 1.
+check_entry() {
+  local content="$1"
+  local header
+  local cog_input
+  local cog_output
 
-    log_info "Checking for changelog files in ${CHANGELOG_DIR}/ directory..."
+  if [[ -z "${content}" ]]; then
+    echo "The entry is empty (lines starting with '# ' are comments)."
+    return 1
+  fi
 
-    while IFS= read -r file; do
-        if [[ "${file}" == "${CHANGELOG_DIR}/"* ]]; then
-            log_info "Found changelog file: ${file}"
-            changelog_found=true
-            break
-        fi
-    done <<< "${changed_files}"
+  header=$(head -n 1 <<<"${content}")
+  header="${header%"${header##*[![:space:]]}"}"
+  if [[ ! "${header}" =~ ${HEADER_RE} ]]; then
+    echo "The first line must be '<type>(<optional scope>): <description>', got:"
+    echo "${header}"
+    return 1
+  fi
 
-    if [[ "${changelog_found}" == "false" ]]; then
-        log_error "No changelog file found in ${CHANGELOG_DIR}/ directory"
-        echo ""
-        echo "📝 Please add a changelog file to document your changes:"
-        echo "   1. Create a new file in the ${CHANGELOG_DIR}/ directory"
-        echo "   2. Name it descriptively (e.g., fix-bug-123.md, add-new-feature.md)"
-        echo "   3. Document what changed, why, and any breaking changes"
-        echo ""
-        return 1
-    fi
+  if [[ -n "${BASH_REMATCH[2]}" ]] || grep -Eq "${BREAKING_FOOTER_RE}" <<<"${content}"; then
+    echo "Breaking changes ('!' after the type or a 'BREAKING CHANGE:' footer)"
+    echo "are not supported by automatic releases. Ask a maintainer."
+    return 1
+  fi
 
-    return 0
+  cog_input=$(mktemp)
+  printf '%s\n' "${content}" >"${cog_input}"
+  if ! cog_output=$(cog verify --file "${cog_input}" 2>&1); then
+    rm -f "${cog_input}"
+    echo "The entry does not follow Conventional Commits (cog verify):"
+    echo "${cog_output}"
+    return 1
+  fi
+  rm -f "${cog_input}"
 }
 
-# Get commit messages for the PR
-get_pr_commits() {
-    local pr_number=$1
-    log_info "Fetching commits for PR #${pr_number}..."
-
-    # Use GitHub API to get PR commits
-    curl -s \
-        -H "Authorization: token ${GITHUB_TOKEN}" \
-        -H "Accept: application/vnd.github.v3+json" \
-        "https://api.github.com/repos/${GITHUB_REPOSITORY}/pulls/${pr_number}/commits" \
-        | jq -r '.[].commit.message'
-}
-
-# Check for version bump trailer in commit messages
-check_version_bump_trailer() {
-    local commit_messages="$1"
-    local version_bump_found=false
-    local version_bump_type=""
-
-    log_info "Checking for Version-Bump trailer in commit messages..."
-
-    while IFS= read -r message; do
-        # Look for Version-Bump: trailer (case insensitive)
-        if echo "${message}" | grep -qi "Version-Bump:"; then
-            # Extract the value after Version-Bump:
-            bump_value=$(echo "${message}" | grep -oiE "Version-Bump:\s*(patch|minor|major|none)" | cut -d':' -f2 | xargs | tr '[:upper:]' '[:lower:]')
-
-            if [[ -n "${bump_value}" ]]; then
-                # Validate the bump value
-                for valid_bump in "${REQUIRED_VERSION_BUMPS[@]}"; do
-                    if [[ "${bump_value}" == "${valid_bump}" ]]; then
-                        log_info "Found valid Version-Bump trailer: ${bump_value}"
-                        version_bump_found=true
-                        version_bump_type="${bump_value}"
-                        break 2
-                    fi
-                done
-            fi
-        fi
-    done <<< "${commit_messages}"
-
-    if [[ "${version_bump_found}" == "false" ]]; then
-        log_error "No valid Version-Bump trailer found in commit messages"
-        echo ""
-        echo "🏷️  Please add a Version-Bump trailer to one of your commits:"
-        echo "   1. Edit your commit message to include one of:"
-        echo "      - Version-Bump: patch   (for bug fixes)"
-        echo "      - Version-Bump: minor   (for new features)"
-        echo "      - Version-Bump: major   (for breaking changes)"
-        echo "      - Version-Bump: none    (for changes not affecting the releasing code)"
-        echo "   2. The trailer should be on its own line at the end of the commit message"
-        echo ""
-        echo "Example commit message:"
-        echo "Fix critical bug in user authentication"
-        echo ""
-        echo "This fixes an issue where users couldn't log in"
-        echo "after password reset."
-        echo ""
-        echo "Version-Bump: patch"
-        echo ""
-        return 1
-    fi
-
-    # Set outputs (only when version bump is found)
-    echo "changelog-found=true" >> $GITHUB_OUTPUT
-    echo "version-bump-found=true" >> $GITHUB_OUTPUT
-    echo "version-bump-type=${version_bump_type}" >> $GITHUB_OUTPUT
-
-    # Export version_bump_type for use in main function
-    export VERSION_BUMP_TYPE="${version_bump_type}"
-
-    return 0
-}
-
-# Add review comment to PR
-add_review_comment() {
-    local pr_number=$1
-    local body="$2"
-    local event="$3"
-
-    log_info "Adding review comment to PR #${pr_number}..."
-
-    # Create the review payload
-    local review_payload=$(jq -n \
-        --arg body "$body" \
-        --arg event "$event" \
-        '{
-            body: $body,
-            event: $event
-        }')
-
-    # Submit the review using GitHub API
-    local response=$(curl -s -w "%{http_code}" \
-        -X POST \
-        -H "Authorization: token ${GITHUB_TOKEN}" \
-        -H "Accept: application/vnd.github.v3+json" \
-        -H "Content-Type: application/json" \
-        -d "$review_payload" \
-        "https://api.github.com/repos/${GITHUB_REPOSITORY}/pulls/${pr_number}/reviews")
-
-    local http_code="${response: -3}"
-    local response_body="${response%???}"
-
-    if [[ "$http_code" == "200" || "$http_code" == "201" ]]; then
-        log_info "Successfully added review comment"
-    else
-        log_error "Failed to add review comment. HTTP code: $http_code"
-        log_error "Response: $response_body"
-    fi
-}
-
-# Generate review comment based on validation results
-generate_review_comment() {
-    local changelog_passed="$1"
-    local version_bump_passed="$2"
-    local version_bump_type="$3"
-
-    local comment_body=""
-    local review_event=""
-
-    if [[ "$changelog_passed" == "true" && "$version_bump_passed" == "true" ]]; then
-        # All checks passed
-        comment_body="## ✅ Changelog Validation Passed
-
-All required data for the changelog validation checks have passed:
-
-- ✅ **Changelog file found** - Changes are documented
-- ✅ **Version bump trailer found** - Type: \`${version_bump_type}\`
-
-This PR is ready for review! 🚀"
-        review_event="COMMENT"
-    else
-        # Some checks failed
-        comment_body="## ❌ Changelog Validation Failed
-
-The following issues were found with this PR:
-
-"
-        if [[ "$changelog_passed" != "true" ]]; then
-            comment_body+="- ❌ **Missing changelog file**
-  - Please add a changelog file to the \`.changelog/\` directory
-  - Name it descriptively (e.g., \`fix-bug-123.md\`, \`add-new-feature.md\`)
-  - Document what changed, why, and any breaking changes
-
-"
-        else
-            comment_body+="- ✅ **Changelog file found**
-
-"
-        fi
-
-        if [[ "$version_bump_passed" != "true" ]]; then
-            comment_body+="- ❌ **Missing version bump trailer**
-  - Please add a \`Version-Bump:\` trailer to one of your commit messages using \`git commit --trailer 'Version-Bump: <type>'\`
-  - Valid types: \`patch\` (bug fixes), \`minor\` (new features), \`major\` (breaking changes) \`none\` (changes not affecting releases)
-  - Example:
-    \`\`\`
-    Fix critical bug in user authentication
-
-    This fixes an issue where users couldn't log in
-    after password reset.
-
-    Version-Bump: patch
-    \`\`\`
-
-"
-        else
-            comment_body+="- ✅ **Version bump trailer found** - Type: \`${version_bump_type}\`
-
-"
-        fi
-
-        comment_body+="
-Please fix the issues above and push your changes. The validation will run again automatically."
-        review_event="REQUEST_CHANGES"
-    fi
-
-    echo "$comment_body|$review_event"
+how_to_summary() {
+  summary "### How to write a changelog entry" \
+    "" \
+    "Add a file to \`${CHANGELOG_DIR}/\` named after the change (e.g. \`fix-discovery-crash.md\`)." \
+    "Its first line follows [Conventional Commits](https://www.conventionalcommits.org/en/v1.0.0/#summary):" \
+    "\`<type>(<optional scope>): <description>\`. Lines below it are the body of the entry," \
+    "and lines starting with \`# \` are comments." \
+    "" \
+    "    fix: resolve a crash in discovery when the network goes down" \
+    "" \
+    "A \`feat\` entry bumps the minor version at release time; other types bump the patch version." \
+    "Breaking changes (\`feat!:\` or a \`BREAKING CHANGE:\` footer) are released manually: ask a maintainer." \
+    ""
+  if [[ -n "${SKIP_LABEL}" ]]; then
+    summary "If this pull request needs no entry (e.g. a forward port or a release)," \
+      "a maintainer can add the \`${SKIP_LABEL}\` label." \
+      ""
+  fi
 }
 
 # Main validation function
 main() {
-    log_info "Starting PR data validation..."
+  local pr_number
+  local files
+  local entries
+  local path
+  local url
+  local raw
+  local reason
+  local i
+  local -a valid_entries=()
+  local -a invalid_entries=()
+  local -a invalid_reasons=()
 
-    # Check if we're in the right context
-    check_pr_context
+  log_info "Starting PR data validation..."
+  check_pr_context
 
-    # Get PR number
-    PR_NUMBER=$(get_pr_number)
-    log_info "Validating PR #${PR_NUMBER}"
+  pr_number=$(jq -r '.pull_request.number' "${GITHUB_EVENT_PATH}")
+  if [[ -z "${pr_number}" || "${pr_number}" == "null" ]]; then
+    log_error "Could not extract PR number from event data"
+    exit 1
+  fi
+  log_info "Validating PR #${pr_number} (HEAD: $(jq -r '.pull_request.head.sha' "${GITHUB_EVENT_PATH}"))"
 
-    # Get changed files
-    CHANGED_FILES=$(get_changed_files "${PR_NUMBER}")
-    log_info "Changed files in PR:"
-    echo "${CHANGED_FILES}"
-    if [[ -z "${CHANGED_FILES}" ]]; then
-        log_warn "No files changed in this PR"
-        return 0
+  if [[ -n "${SKIP_LABEL}" ]] &&
+    jq -e --arg label "${SKIP_LABEL}" \
+      'any(.pull_request.labels[]?; .name == $label)' "${GITHUB_EVENT_PATH}" >/dev/null; then
+    log_info "The PR has the '${SKIP_LABEL}' label: skipping the changelog check"
+    summary "## ⏭️ Changelog check skipped" "" \
+      "This pull request has the \`${SKIP_LABEL}\` label."
+    set_outputs false false
+    exit 0
+  fi
+
+  if ! files=$(get_pr_files "${pr_number}"); then
+    log_error "Could not get the list of files of PR #${pr_number} from GitHub"
+    annotate_error "" "Changelog check error" \
+      "Could not get the list of files of the pull request from GitHub. Re-run the job."
+    exit 1
+  fi
+  if [[ -z "${files}" ]]; then
+    log_warn "No files changed in this PR"
+    set_outputs false false
+    exit 0
+  fi
+
+  entries=$(select_entries <<<"${files}")
+  if [[ -z "${entries}" ]]; then
+    log_error "No changelog entry found in ${CHANGELOG_DIR}/"
+    annotate_error "" "Missing changelog entry" \
+      "Add a file to ${CHANGELOG_DIR}/ describing the change. See the job summary."
+    summary "## ❌ Missing changelog entry" "" \
+      "This pull request does not add or modify any file in \`${CHANGELOG_DIR}/\`." ""
+    how_to_summary
+    set_outputs false false
+    exit 1
+  fi
+
+  while IFS=$'\t' read -r path url <&3; do
+    log_info "Validating ${path}"
+    if ! raw=$(api_get "${url}" "application/vnd.github.raw+json"); then
+      reason="Could not download the file from GitHub. Re-run the job."
+    elif reason=$(check_entry "$(normalize_entry <<<"${raw}")"); then
+      log_info "${path} is valid"
+      valid_entries+=("${path}")
+      continue
     fi
+    log_error "${path} is not valid:"
+    print_untrusted "${reason}"
+    annotate_error "${path}" "Invalid changelog entry" "${reason}"
+    invalid_entries+=("${path}")
+    invalid_reasons+=("${reason}")
+  done 3<<<"${entries}"
 
-    # Check for changelog file
-    changelog_check_passed=true
-    if ! check_changelog_file "${CHANGED_FILES}"; then
-        changelog_check_passed=false
-    fi
+  if [[ ${#invalid_entries[@]} -eq 0 ]]; then
+    summary "## ✅ Changelog entries are valid" ""
+    for path in "${valid_entries[@]}"; do
+      summary "- \`${path}\`"
+    done
+    set_outputs true true
+    log_info "✅ All PR data validation checks passed!"
+    exit 0
+  fi
 
-    # Get commit messages
-    COMMIT_MESSAGES=$(get_pr_commits "${PR_NUMBER}")
-    if [[ -z "${COMMIT_MESSAGES}" ]]; then
-        log_error "No commit messages found for this PR"
-        exit 1
-    fi
-
-    # Check for version bump trailer
-    version_bump_check_passed=true
-    if ! check_version_bump_trailer "${COMMIT_MESSAGES}"; then
-        version_bump_check_passed=false
-    fi
-
-    # Generate review comment
-    REVIEW_COMMENT=$(generate_review_comment "${changelog_check_passed}" "${version_bump_check_passed}" "${VERSION_BUMP_TYPE}")
-    COMMENT_BODY="${REVIEW_COMMENT%|*}"
-    REVIEW_EVENT="${REVIEW_COMMENT#*|}"
-
-    # Add review comment to PR
-    add_review_comment "${PR_NUMBER}" "${COMMENT_BODY}" "${REVIEW_EVENT}"
-
-    # Final validation result
-    if [[ "${changelog_check_passed}" == "true" && "${version_bump_check_passed}" == "true" ]]; then
-        log_info "✅ All PR data validation checks passed!"
-        exit 0
-    else
-        log_error "❌ PR data validation failed"
-        echo ""
-        echo "Please fix the issues above and push your changes."
-        exit 1
-    fi
+  summary "## ❌ Invalid changelog entries" ""
+  for i in "${!invalid_entries[@]}"; do
+    summary "#### \`${invalid_entries[$i]}\`" "" "$(indent_block "${invalid_reasons[$i]}")" ""
+  done
+  if [[ ${#valid_entries[@]} -gt 0 ]]; then
+    summary "Valid entries:" ""
+    for path in "${valid_entries[@]}"; do
+      summary "- \`${path}\`"
+    done
+    summary ""
+  fi
+  how_to_summary
+  set_outputs true false
+  log_error "❌ PR data validation failed: ${#invalid_entries[@]} invalid changelog entries"
+  exit 1
 }
 
 # Run main function
