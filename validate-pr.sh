@@ -37,17 +37,19 @@ HEADER_RE='^[a-z]+(\([^()]+\))?(!)?: [^[:space:]]'
 # Conventional Commits breaking change footer
 BREAKING_FOOTER_RE='^BREAKING[ -]CHANGE(: | #)'
 
-# Helper functions
+# Helper functions. The message is printed as is (%s): it can contain file
+# names from the PR, and expanding their escapes (echo -e) could print a new
+# line that GitHub runs as a workflow command.
 log_info() {
-  echo -e "${GREEN}[INFO]${NC} $1"
+  printf '%b[INFO]%b %s\n' "${GREEN}" "${NC}" "$1"
 }
 
 log_warn() {
-  echo -e "${YELLOW}[WARN]${NC} $1"
+  printf '%b[WARN]%b %s\n' "${YELLOW}" "${NC}" "$1"
 }
 
 log_error() {
-  echo -e "${RED}[ERROR]${NC} $1"
+  printf '%b[ERROR]%b %s\n' "${RED}" "${NC}" "$1"
 }
 
 # Print text that comes from the pull request (entry content, cog output)
